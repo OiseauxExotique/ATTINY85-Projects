@@ -1,0 +1,212 @@
+#include <avr/io.h> 
+#include <avr/interrupt.h>
+
+// this program outputs a low frequency oscillator in different waveshapes.
+// currently output is 0.2Hz to 55Hz with about 0.2Hz resolution
+// output sample rate is 14,285Hz
+
+volatile int count = 1;
+volatile uint16_t phase = 0;
+volatile uint8_t index = 3;
+volatile int waveformSelect = 1;
+volatile int firstSample = 0;
+volatile int sqr = 0;
+
+volatile int millies = 0;
+volatile int tapFlag = 0;
+volatile int nTaps = 0;
+volatile int previousADCH = 1;
+
+volatile uint8_t Sine[256] =
+{
+      0,   0,   0,   0,   1,   1,   1,   2,   2,   3,   4,   5,   5,   6,   7,   9,
+     10,  11,  12,  14,  15,  17,  18,  20,  21,  23,  25,  27,  29,  31,  33,  35,
+     37,  40,  42,  44,  47,  49,  52,  54,  57,  59,  62,  65,  67,  70,  73,  76,
+     79,  82,  85,  88,  90,  93,  97, 100, 103, 106, 109, 112, 115, 118, 121, 124,
+    128, 131, 134, 137, 140, 143, 146, 149, 152, 155, 158, 162, 165, 167, 170, 173,
+    176, 179, 182, 185, 188, 190, 193, 196, 198, 201, 203, 206, 208, 211, 213, 215,
+    218, 220, 222, 224, 226, 228, 230, 232, 234, 235, 237, 238, 240, 241, 243, 244,
+    245, 246, 248, 249, 250, 250, 251, 252, 253, 253, 254, 254, 254, 255, 255, 255,
+    255, 255, 255, 255, 254, 254, 254, 253, 253, 252, 251, 250, 250, 249, 248, 246,
+    245, 244, 243, 241, 240, 238, 237, 235, 234, 232, 230, 228, 226, 224, 222, 220,
+    218, 215, 213, 211, 208, 206, 203, 201, 198, 196, 193, 190, 188, 185, 182, 179,
+    176, 173, 170, 167, 165, 162, 158, 155, 152, 149, 146, 143, 140, 137, 134, 131,
+    128, 124, 121, 118, 115, 112, 109, 106, 103, 100,  97,  93,  90,  88,  85,  82,
+     79,  76,  73,  70,  67,  65,  62,  59,  57,  54,  52,  49,  47,  44,  42,  40,
+     37,  35,  33,  31,  29,  27,  25,  23,  21,  20,  18,  17,  15,  14,  12,  11,
+     10,   9,   7,   6,   5,   5,   4,   3,   2,   2,   1,   1,   1,   0,   0,   0
+};
+
+void setRegisters()
+{
+  DDRB |= (1 << PB1);
+  DDRB |= (1 << PB0);
+  DDRB |= (0 << PB2);
+
+  ADMUX = (1 << ADLAR) | (1 << MUX1) | (1 << MUX0);                   // Left-adjust, input channel = PB3.
+  ADCSRA = (1 << ADATE) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0); // Auto-trigger, division = 64.
+  ADCSRB = 0x00;                                                      // Free-running mode.
+  ADCSRA |= (1 << ADEN) | (1 << ADIE);                                // ADC enabled, ADC interrupt enabled.
+  ADCSRA |= (1 << ADSC);    
+  
+  TIMSK = 0;
+
+  TCCR1 |= (1 << PWM1A) // PWM MODE A
+        |  (1 << COM1A1) // PB1
+        |  (0 << COM1A0) // 
+        |  (1 << CS10);  // NO PRESCALING
+
+  OCR1C = 250;
+
+  TCCR0A = 2<<WGM00;                      // CTC mode
+  TCCR0B = (1 << CS01);                   // / no prescaler
+  OCR0A = 70;                 //initial register value 
+  TIMSK = TIMSK | 1<<OCIE0A;              // Enable interrupt
+
+  PCMSK = (1 << PCINT2);                  // Select PB2 a pin change interrupt source.
+  GIMSK |= (1 << PCIE);  
+
+  sei();
+}
+
+
+ISR(PCINT0_vect)
+{
+  nTaps++;
+}
+
+ISR(TIMER0_COMPA_vect)
+{
+  plotWave();
+  if(nTaps == 1)
+  {
+    millies++;
+    tapFlag = 0;
+    if(millies > 70000)
+    {
+      tapFlag = 1;
+      nTaps = 0;
+    }
+  }
+  if(nTaps == 2)
+  {
+    tapFlag = 1;
+    if(millies > 70000)
+    {
+      count = 1;
+    }
+    else
+    {
+      if(millies < 3000)
+      {
+        count = 69;
+      }
+      else
+      {
+        count = (int)(millies / 3000) + 1;
+      }
+    }
+    millies = 0;
+    nTaps = 0;
+  }
+}
+
+ISR(ADC_vect)
+{
+  if(firstSample > 1)
+  {
+    if(ADMUX & 0x01) // ADC read from waveform select pot (PB3)
+    {
+      if(ADCH >= 0 && ADCH <= 51)
+      {
+        waveformSelect = 1;
+      }
+      if(ADCH > 51 && ADCH <= 102)
+      {
+        waveformSelect = 2;
+      }
+      if(ADCH > 102 && ADCH <= 153)
+      {
+        waveformSelect = 3;
+      }
+      if(ADCH > 153 && ADCH <= 204)
+      {
+        waveformSelect = 4;
+      }
+      if(ADCH > 204)
+      {
+        waveformSelect = 5;
+      }
+    }
+    else // ADC read from frequency pot PB4
+    {
+      if(ADCH >= (previousADCH+2) || ADCH <= (previousADCH-2))
+      {
+        count = ADCH | 1;
+        tapFlag = 0;
+      }
+      previousADCH = ADCH;
+    }
+    ADMUX ^= (1 << MUX0); // toggle between PB3 and PB4. 
+    firstSample = 0;
+  }
+  firstSample++;
+}
+
+int main()
+{
+  setRegisters();
+  while(1)
+  {
+    
+  }
+  return 0;
+}
+
+volatile void plotWave()
+{
+  phase += count;
+  index = phase >> 8;
+  if(index >= 255)
+  {
+    phase = 0;
+    index = 0;
+  }
+  sqr = (index >> 7) * 255;
+//  if(sqr > 10) // sync output
+//  {
+//    PORTB |= (1 << PB0);
+//  }
+//  else
+//  {
+//    PORTB &= ~ (1 << PB0);
+//  }
+
+  if(waveformSelect == 1)
+  {
+    OCR1A = Sine[index];
+  }
+  if(waveformSelect == 2)
+  {
+    if(index <= 127)
+    {
+      OCR1A = index * 2;
+    }
+    else
+    {
+      OCR1A = (255 - index) * 2;
+    }
+  }
+  if(waveformSelect == 3)
+  {
+    OCR1A = index;
+  }
+  if(waveformSelect == 4)
+  {
+    OCR1A = 255 - index;
+  }
+  if(waveformSelect == 5)
+  {
+    OCR1A = sqr;
+  }
+}
